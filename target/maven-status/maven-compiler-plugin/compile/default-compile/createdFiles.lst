@@ -1,0 +1,9 @@
+com\example\xkcdfetcher\model\XkcdComic.class
+com\example\xkcdfetcher\controller\XkcdOptimizedController.class
+com\example\xkcdfetcher\controller\XkcdController.class
+com\example\xkcdfetcher\client\XkcdHttpClient.class
+com\example\xkcdfetcher\XkcdFetcherApplication.class
+com\example\xkcdfetcher\controller\HelloController.class
+com\example\xkcdfetcher\service\XkcdServiceOptimized.class
+com\example\xkcdfetcher\config\HttpClientConfig.class
+com\example\xkcdfetcher\service\XkcdService.class

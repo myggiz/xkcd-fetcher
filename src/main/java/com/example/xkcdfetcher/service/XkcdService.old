@@ -1,0 +1,153 @@
+package com.example.xkcdfetcher.service;
+
+import com.example.xkcdfetcher.client.XkcdHttpClient;
+import com.example.xkcdfetcher.model.XkcdComic;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.cache.annotation.Cacheable;
+import org.springframework.stereotype.Service;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
+
+import java.time.Duration;
+import java.util.List;
+
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class XkcdService {
+
+    private final XkcdHttpClient client;
+    private static final int BATCH_SIZE = 50;
+    private static final int MAX_CONCURRENT_REQUESTS = 20;
+    private static final int MAX_RETRIES = 3;
+    private static final Duration INITIAL_RETRY_DELAY = Duration.ofMillis(500);
+
+    /**
+     * Fetches the latest XKCD comic
+     */
+    public Mono<XkcdComic> getLatestComic() {
+        return client.getLatestComic()
+                .cache(Duration.ofMinutes(5));
+    }
+
+    /**
+     * Fetches a specific XKCD comic by ID with retry and cache
+     */
+    @Cacheable(value = "comics", key = "#id", unless = "#result == null")
+    public Mono<XkcdComic> getComicById(int id) {
+        return client.getComicById(id)
+                .retryWhen(reactor.util.retry.Retry.backoff(MAX_RETRIES, INITIAL_RETRY_DELAY)
+                        .filter(throwable -> !(throwable instanceof org.springframework.web.reactive.function.client.WebClientResponseException.NotFound))
+                        .doBeforeRetry(retry -> log.warn("Retrying comic {}: {}", id, retry.failure().getMessage()))
+                        .onRetryExhaustedThrow((retryBackoffSpec, retrySignal) -> 
+                            new RuntimeException(String.format("Failed to fetch comic %d after %d retries", id, MAX_RETRIES), retrySignal.failure()))
+                )
+                .cache(Duration.ofHours(1));
+    }
+
+    /**
+     * Fetches all XKCD comics in parallel with batching and error handling
+     */
+    public Flux<XkcdComic> getAllComics() {
+        return getLatestComic()
+                .publishOn(Schedulers.boundedElastic())
+                .mapNotNull(XkcdComic::num)
+                .flatMapMany(latestComicId -> 
+                    Flux.range(1, latestComicId)
+                        .filter(id -> id != 404) // Skip 404 as it's a special case in XKCD API
+                        .buffer(BATCH_SIZE) // Process in batches of BATCH_SIZE
+                        .flatMap(this::fetchComicsInParallel, MAX_CONCURRENT_REQUESTS)
+                )
+                .subscribeOn(Schedulers.parallel())
+                .doOnError(e -> log.error("Error in getAllComics: {}", e.getMessage()))
+                .onErrorResume(e -> {
+                    log.error("Critical error in getAllComics", e);
+                    return Flux.empty();
+                });
+    }
+
+    /**
+     * Fetches a batch of comics in parallel
+     */
+    private Flux<XkcdComic> fetchComicsInParallel(List<Integer> comicIds) {
+        return Flux.fromIterable(comicIds)
+                .parallel(MAX_CONCURRENT_REQUESTS)
+                .runOn(Schedulers.parallel())
+                .flatMap(comicId -> getComicById(comicId)
+                        .onErrorResume(e -> {
+                            log.error("Error fetching comic {}: {}", comicId, e.getMessage());
+                            return Mono.empty();
+                        })
+                )
+                .sequential();
+    }
+
+    private final XkcdHttpClient client;
+    private static final int BATCH_SIZE = 50;
+    private static final int MAX_CONCURRENT_REQUESTS = 20;
+    private static final int MAX_RETRIES = 3;
+    private static final Duration INITIAL_RETRY_DELAY = Duration.ofMillis(500);
+
+    /**
+     * Fetches the latest XKCD comic
+     */
+    public Mono<XkcdComic> getLatestComic() {
+        return client.getLatestComic()
+                .cache(Duration.ofMinutes(5)); // Cache the latest comic for 5 minutes
+    }
+
+    /**
+     * Fetches a specific XKCD comic by ID with retry and cache
+     */
+    @Cacheable(value = "comics", key = "#id", unless = "#result == null")
+    public Mono<XkcdComic> getComicById(int id) {
+        return client.getComicById(id)
+                .retryWhen(reactor.util.retry.Retry.backoff(MAX_RETRIES, INITIAL_RETRY_DELAY)
+                        .filter(throwable -> !(throwable instanceof org.springframework.web.reactive.function.client.WebClientResponseException.NotFound))
+                        .doBeforeRetry(retry -> log.warn("Retrying comic {}: {}", id, retry.failure().getMessage()))
+                        .onRetryExhaustedThrow((retryBackoffSpec, retrySignal) -> 
+                            new RuntimeException(String.format("Failed to fetch comic %d after %d retries", id, MAX_RETRIES), retrySignal.failure()))
+                )
+                .cache(Duration.ofHours(1)); // Cache the result for 1 hour
+    }
+
+    /**
+     * Fetches all XKCD comics in parallel with batching and error handling
+     */
+    public Flux<XkcdComic> getAllComics() {
+        return getLatestComic()
+                .publishOn(Schedulers.boundedElastic())
+                .mapNotNull(XkcdComic::num)
+                .flatMapMany(latestComicId -> 
+                    Flux.range(1, latestComicId)
+                        .filter(id -> id != 404) // Skip 404 as it's a special case in XKCD API
+                        .buffer(BATCH_SIZE) // Process in batches of BATCH_SIZE
+                        .flatMap(this::fetchComicsInParallel, MAX_CONCURRENT_REQUESTS)
+                )
+                .subscribeOn(Schedulers.parallel())
+                .doOnError(e -> log.error("Error in getAllComics: {}", e.getMessage()))
+                .onErrorResume(e -> {
+                    log.error("Critical error in getAllComics", e);
+                    return Flux.empty();
+                });
+    }
+
+    /**
+     * Fetches a batch of comics in parallel
+     */
+    private Flux<XkcdComic> fetchComicsInParallel(List<Integer> comicIds) {
+        return Flux.fromIterable(comicIds)
+                .parallel(MAX_CONCURRENT_REQUESTS)
+                .runOn(Schedulers.parallel())
+                .flatMap(comicId -> getComicById(comicId)
+                        .onErrorResume(e -> {
+                            log.error("Error fetching comic {}: {}", comicId, e.getMessage());
+                            return Mono.empty();
+                        })
+                )
+                .sequential();
+    }
+}
+}
