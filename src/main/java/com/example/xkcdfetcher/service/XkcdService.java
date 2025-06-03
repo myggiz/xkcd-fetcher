@@ -5,7 +5,6 @@ import com.example.xkcdfetcher.model.XkcdComic;
 import io.github.bucket4j.Bandwidth;
 import io.github.bucket4j.Bucket;
 import io.github.bucket4j.Refill;
-import java.util.function.Supplier;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.cache.annotation.CacheConfig;
 import org.springframework.cache.annotation.CacheEvict;
@@ -29,13 +28,12 @@ import java.util.concurrent.atomic.AtomicLong;
 @Service
 @CacheConfig(cacheNames = "comics")
 public class XkcdService {
-    private static final int INITIAL_BATCH_SIZE = 10;
-    private static final int MAX_BATCH_SIZE = 30;
-    private static final int MIN_BATCH_SIZE = 5;
-    private static final int MAX_CONCURRENT_REQUESTS = 10;  
+    private static final int MAX_CONCURRENT_REQUESTS = 5;  // Balanced concurrency
     private static final int MAX_RETRY_ATTEMPTS = 2;
-    private static final Duration INITIAL_RETRY_DELAY = Duration.ofSeconds(1);
+    private static final Duration INITIAL_RETRY_DELAY = Duration.ofMillis(200);
     private static final Duration RATE_LIMIT_WINDOW = Duration.ofSeconds(10);
+    private static final int REQUESTS_PER_WINDOW = 30;  // 3 requests per second on average
+    private static final Duration REQUEST_DELAY = Duration.ofMillis(50);  // Delay between requests
 
     private final XkcdHttpClient client;
     private final Map<Integer, XkcdComic> comicCache = new ConcurrentHashMap<>();
@@ -44,7 +42,7 @@ public class XkcdService {
     private final Semaphore concurrencySemaphore;
     private final AtomicLong lastErrorTime = new AtomicLong(0);
     private final AtomicInteger consecutiveErrors = new AtomicInteger(0);
-    private final AtomicInteger currentBatchSize = new AtomicInteger(INITIAL_BATCH_SIZE);
+    private final AtomicInteger currentBatchSize = new AtomicInteger(5); // Fixed batch size
 
     public XkcdService(XkcdHttpClient client) {
         this.client = client;
@@ -60,42 +58,24 @@ public class XkcdService {
             );
     }
 
-    private int getAdaptiveBatchSize() {
-        long timeSinceLastError = System.currentTimeMillis() - lastErrorTime.get();
-        int currentSize = currentBatchSize.get();
 
-        // Gradually increase batch size if no recent errors
-        if (timeSinceLastError > 30000) { // 30 seconds since last error
-            return Math.min(MAX_BATCH_SIZE, currentSize + 5);
-        }
-
-        // Reduce batch size if we're seeing errors
-        if (consecutiveErrors.get() > 0) {
-            return Math.max(MIN_BATCH_SIZE, (int)(currentSize * 0.7));
-        }
-
-        return currentSize;
-    }
 
     private void adjustBatchSize(boolean success) {
         if (success) {
-            // Gradually increase batch size on success
-            currentBatchSize.updateAndGet(current ->
-                Math.min(MAX_BATCH_SIZE, current + 1)
-            );
+            // Keep batch size fixed when successful
+            currentBatchSize.set(5);
         } else {
-            // Decrease batch size on error
-            currentBatchSize.updateAndGet(current ->
-                Math.max(MIN_BATCH_SIZE, (int)(current * 0.8))
-            );
+            // Reset to minimum batch size on errors
+            currentBatchSize.set(3);
         }
-        log.info("Adjusted batch size to {}", currentBatchSize.get());
+        log.debug("Adjusted batch size to {}", currentBatchSize.get());
     }
 
     private Bucket createRateLimiter() {
-        // 50 requests per 10 seconds = 5 requests per second with burst up to 50
-        Refill refill = Refill.intervally(50, RATE_LIMIT_WINDOW);
-        Bandwidth limit = Bandwidth.classic(50, refill);
+        // More conservative rate limiting
+        Refill refill = Refill.intervally(REQUESTS_PER_WINDOW, RATE_LIMIT_WINDOW);
+        Bandwidth limit = Bandwidth.classic(REQUESTS_PER_WINDOW, refill)
+            .withInitialTokens(REQUESTS_PER_WINDOW);
         return Bucket.builder()
             .addLimit(limit)
             .build();
@@ -232,21 +212,29 @@ public class XkcdService {
         return getLatestComic()
             .flatMapMany(latest -> {
                 int latestId = latest.num();
+                log.info("Starting to fetch {} comics with concurrency: {}", latestId, MAX_CONCURRENT_REQUESTS);
+                
+                // Create a flux of comic IDs with prefetch for better performance
                 return Flux.range(1, latestId)
-                    .window(20) // Process in larger batches of 20 comics
-                    .flatMap(window -> window
-                        .parallel(8) // Process up to 8 comics in parallel
-                        .runOn(Schedulers.parallel())
-                        .flatMap(id -> getComicById(id)
-                            .onErrorResume(e -> {
-                                log.warn("Skipping comic {}: {}", id, e.getMessage());
-                                return Mono.empty();
-                            }))
-                        .sequential(), 2) // Process 2 batches in parallel
-                    .onBackpressureBuffer(100);
+                    // Process in parallel with controlled concurrency (fixed at 5)
+                    .parallel(5)
+                    .runOn(Schedulers.boundedElastic())
+                    .flatMap(id -> getComicById(id)
+                        .onErrorResume(e -> {
+                            log.debug("Skipping comic {}: {}", id, e.getMessage());
+                            return Mono.empty();
+                        })
+                        .timeout(Duration.ofSeconds(3))
+                    )
+                    .sequential()
+                    // Add controlled delay between requests to respect rate limits
+                    .delayElements(REQUEST_DELAY)
+                    .onBackpressureBuffer(100)
+                    .timeout(Duration.ofMinutes(2));
             })
-            .timeout(Duration.ofMinutes(2)) // Increased timeout for full fetch
-            .retryWhen(Retry.backoff(3, Duration.ofSeconds(1)));
+            .retryWhen(Retry.backoff(MAX_RETRY_ATTEMPTS, INITIAL_RETRY_DELAY)
+                .maxBackoff(Duration.ofSeconds(2))
+                .jitter(0.3));
     }
     
     @Scheduled(fixedRate = 3600000) // Every hour
