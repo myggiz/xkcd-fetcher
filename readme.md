@@ -1,8 +1,8 @@
-# 📡 Reactive XKCD Fetcher (Java 24 + Spring Boot 3.2 + WebFlux + HTTP Interfaces)
+# 📡 Reactive XKCD Fetcher (Java 21 + Spring Boot 3.5.0 + WebFlux + HTTP Interfaces)
 
 This project is a **reactive XKCD comic fetcher** using:
-- ✅ Java 24 (with optional Structured Concurrency)
-- ✅ Spring Boot 3.2+
+- ✅ Java 21 (with optional Structured Concurrency)
+- ✅ Spring Boot 3.5.0
 - ✅ Spring Framework 6.1+
 - ✅ Spring WebFlux (Reactive Stack)
 - ✅ HTTP Interfaces (new in Spring 6.1)
